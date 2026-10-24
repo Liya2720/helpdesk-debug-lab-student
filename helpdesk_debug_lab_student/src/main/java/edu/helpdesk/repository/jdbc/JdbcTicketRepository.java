@@ -8,6 +8,7 @@ import edu.helpdesk.model.TicketStatus;
 import edu.helpdesk.repository.TicketRepository;
 
 import java.sql.*;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -15,25 +16,36 @@ import java.util.Optional;
 public class JdbcTicketRepository implements TicketRepository {
 
     @Override
-    public Ticket create(String title, String description, TicketPriority priority, long authorId, Long categoryId) {
+    public Ticket create(String title, String description, TicketPriority priority, long authorId, Long categoryId, LocalDateTime dueAt) {
         String sql = """
-                INSERT INTO tickets(title, description, status, priority, author_id, category_id)
-                VALUES (?, ?, 'NEW', ?, ?, ?)
-                RETURNING *
-                """;
+            INSERT INTO tickets(title, description, status, priority, author_id, category_id, due_at)
+            VALUES (?, ?, 'NEW', ?, ?, ?, ?)
+            RETURNING *
+            """;
+
         try (Connection connection = Database.getConnection();
              PreparedStatement ps = connection.prepareStatement(sql)) {
+
             ps.setString(1, title);
             ps.setString(2, description);
             ps.setString(3, priority.name());
             ps.setLong(4, authorId);
-            if (categoryId == null) ps.setNull(5, Types.BIGINT); else ps.setLong(5, categoryId);
+            if (categoryId != null) {
+                ps.setLong(5, categoryId);
+            } else {
+                ps.setNull(5, java.sql.Types.BIGINT);
+            }
+            if (dueAt != null) {
+                ps.setTimestamp(6, java.sql.Timestamp.valueOf(dueAt));
+            } else {
+                ps.setNull(6, java.sql.Types.TIMESTAMP);
+            }
             try (ResultSet rs = ps.executeQuery()) {
                 rs.next();
                 return mapTicket(rs);
             }
         } catch (SQLException e) {
-            throw new DataAccessException("Не удалось создать заявку", e);
+            throw new DataAccessException("Ошибка создания заявки", e);
         }
     }
 
@@ -59,59 +71,70 @@ public class JdbcTicketRepository implements TicketRepository {
 
     @Override
     public List<Ticket> findByStatus(TicketStatus status) {
-        String sql = "SELECT * FROM tickets WHERE priority = ? ORDER BY id";
+        String sql = "SELECT * FROM tickets WHERE status = ? ORDER BY id";
         return list(sql, ps -> ps.setString(1, status.name()));
     }
 
     @Override
     public List<Ticket> searchByTitle(String query) {
-        String sql = "SELECT * FROM tickets WHERE LOWER(title) = LOWER(?) ORDER BY id";
-        return list(sql, ps -> ps.setString(1, query));
+        String sql = "SELECT * FROM tickets WHERE title ILIKE ? ORDER BY id";
+        return list(sql, ps -> ps.setString(1, "%" + query + "%"));
     }
 
     @Override
-    public int assign(long ticketId, long assigneeId) {
-        String sql = "UPDATE tickets SET assignee_id = ?, updated_at = CURRENT_TIMESTAMP";
+    public int assign(long ticketId, long assigneeId, int currentVersion) {
+        String sql = "UPDATE tickets SET assignee_id = ?, updated_at = CURRENT_TIMESTAMP, version = version + 1 WHERE id = ? AND version = ?";
         try (Connection connection = Database.getConnection();
              PreparedStatement ps = connection.prepareStatement(sql)) {
             ps.setLong(1, assigneeId);
-            return ps.executeUpdate();
+            ps.setLong(2, ticketId);
+            ps.setInt(3, currentVersion);
+
+            int updated = ps.executeUpdate();
+            if (updated != 1) {
+                throw new DataAccessException("Ожидалась одна изменённая заявка, обновлено: " + updated, null);
+            }
+            return updated;
         } catch (SQLException e) {
             throw new DataAccessException("Ошибка назначения исполнителя", e);
         }
     }
 
     @Override
-    public void changeStatusAndRecordHistory(long ticketId,
-                                             TicketStatus oldStatus,
-                                             TicketStatus newStatus,
-                                             long changedBy) {
-        String update = "UPDATE tickets SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?";
-        String history = """
-                INSERT INTO ticket_status_history(ticket_id, old_status, new_status, changed_by)
-                VALUES (?, ?, ?, ?)
-                """;
+    public void changeStatusAndRecordHistory(long ticketId, TicketStatus oldStatus, TicketStatus newStatus, long changedBy, int currentVersion) {
+        String updateSql = "UPDATE tickets SET status = ?, updated_at = CURRENT_TIMESTAMP, version = version + 1 WHERE id = ? AND version = ?";
+        String historySql = "INSERT INTO ticket_status_history(ticket_id, old_status, new_status, changed_by) VALUES (?, ?, ?, ?)";
+        try (Connection connection = Database.getConnection()) {
+            connection.setAutoCommit(false);
+            try (PreparedStatement ps1 = connection.prepareStatement(updateSql);
+                 PreparedStatement ps2 = connection.prepareStatement(historySql)) {
+                ps1.setString(1, newStatus.name());
+                ps1.setLong(2, ticketId);
+                ps1.setInt(3, currentVersion);
 
-        try (Connection connection = Database.getConnection();
-             PreparedStatement ps = connection.prepareStatement(update)) {
-            ps.setString(1, newStatus.name());
-            ps.setLong(2, ticketId);
-            if (ps.executeUpdate() != 1) {
-                throw new SQLException("Заявка не найдена: " + ticketId);
+                int updated = ps1.executeUpdate();
+
+                if (updated != 1) {
+                    throw new DataAccessException("Конфликт версий: заявка уже изменена другим пользователем", null);
+                }
+
+                ps2.setLong(1, ticketId);
+                ps2.setString(2, oldStatus != null ? oldStatus.name() : null);
+                ps2.setString(3, newStatus.name());
+                ps2.setLong(4, changedBy);
+                ps2.executeUpdate();
+
+                connection.commit();
+
+            } catch (Exception e) {
+                connection.rollback();
+                throw e;
+            } finally {
+                connection.setAutoCommit(true);
             }
-        } catch (SQLException e) {
-            throw new DataAccessException("Не удалось изменить статус", e);
-        }
 
-        try (Connection connection = Database.getConnection();
-             PreparedStatement ps = connection.prepareStatement(history)) {
-            ps.setLong(1, ticketId);
-            ps.setString(2, oldStatus.name());
-            ps.setString(3, newStatus.name());
-            ps.setLong(4, changedBy);
-            ps.executeUpdate();
         } catch (SQLException e) {
-            throw new DataAccessException("Не удалось записать историю статуса", e);
+            throw new DataAccessException("Ошибка соединения с БД", e);
         }
     }
 
@@ -132,7 +155,7 @@ public class JdbcTicketRepository implements TicketRepository {
     private Ticket mapTicket(ResultSet rs) throws SQLException {
         return new Ticket(
                 rs.getLong("id"),
-                rs.getString("description"),
+                rs.getString("title"),
                 rs.getString("description"),
                 TicketStatus.valueOf(rs.getString("status")),
                 TicketPriority.valueOf(rs.getString("priority")),
@@ -140,7 +163,9 @@ public class JdbcTicketRepository implements TicketRepository {
                 nullableLong(rs, "assignee_id"),
                 nullableLong(rs, "category_id"),
                 rs.getTimestamp("created_at").toLocalDateTime(),
-                rs.getTimestamp("updated_at").toLocalDateTime()
+                rs.getTimestamp("updated_at").toLocalDateTime(),
+                rs.getTimestamp("due_at") != null ? rs.getTimestamp("due_at").toLocalDateTime() : null,
+                rs.getInt("version")
         );
     }
 
@@ -152,5 +177,13 @@ public class JdbcTicketRepository implements TicketRepository {
     @FunctionalInterface
     private interface SqlBinder {
         void bind(PreparedStatement statement) throws SQLException;
+    }
+
+    @Override
+    public List<Ticket> findOverdue(LocalDateTime now) {
+        // Ищем заявки, у которых срок истек, и они не RESOLVED/CLOSED
+        String sql = "SELECT * FROM tickets WHERE due_at < ? AND status NOT IN ('RESOLVED', 'CLOSED') ORDER BY due_at";
+
+        return list(sql, ps -> ps.setTimestamp(1, Timestamp.valueOf(now)));
     }
 }

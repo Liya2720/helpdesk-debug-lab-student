@@ -4,6 +4,7 @@ import edu.helpdesk.model.*;
 import edu.helpdesk.repository.CommentRepository;
 import edu.helpdesk.repository.TicketRepository;
 import edu.helpdesk.repository.UserRepository;
+import java.time.LocalDateTime;
 
 import java.util.List;
 
@@ -26,13 +27,23 @@ public class TicketService {
         if (title == null || title.isBlank()) throw new IllegalArgumentException("Тема обязательна");
         if (description == null || description.isBlank()) throw new IllegalArgumentException("Описание обязательно");
         users.findById(authorId).orElseThrow(() -> new IllegalArgumentException("Автор не найден"));
-        return tickets.create(title.trim(), description.trim(), priority, authorId, categoryId);
+        LocalDateTime dueAt = switch (priority) {
+            case CRITICAL -> LocalDateTime.now().plusHours(1);
+            case HIGH -> LocalDateTime.now().plusHours(4);
+            case MEDIUM -> LocalDateTime.now().plusHours(8);
+            case LOW -> LocalDateTime.now().plusHours(24);
+        };
+        return tickets.create(title.trim(), description.trim(), priority, authorId, categoryId, dueAt);
     }
 
     public void assignTicket(long ticketId, long assigneeId) {
-        tickets.findById(ticketId).orElseThrow(() -> new IllegalArgumentException("Заявка не найдена"));
-        users.findById(assigneeId).orElseThrow(() -> new IllegalArgumentException("Пользователь не найден"));
-        int updated = tickets.assign(ticketId, assigneeId);
+        Ticket ticket = tickets.findById(ticketId).orElseThrow(() -> new IllegalArgumentException("Заявка не найдена"));
+        User assignee = users.findById(assigneeId)
+                .orElseThrow(() -> new IllegalArgumentException("Пользователь не найден"));
+        if (assignee.getRole() == UserRole.CUSTOMER) {
+            throw new IllegalArgumentException("Клиента нельзя назначить исполнителем");
+        }
+        int updated = tickets.assign(ticketId, assigneeId,ticket.getVersion());
         if (updated != 1) {
             throw new IllegalStateException("Ожидалось изменение одной заявки, изменено: " + updated);
         }
@@ -55,11 +66,14 @@ public class TicketService {
         users.findById(changedBy).orElseThrow(() -> new IllegalArgumentException("Пользователь не найден"));
         TicketStatus old = ticket.getStatus();
         ticket.transitionTo(newStatus);
-        tickets.changeStatusAndRecordHistory(ticketId, old, newStatus, changedBy);
+        tickets.changeStatusAndRecordHistory(ticketId, old, newStatus, changedBy, ticket.getVersion());
     }
 
     public List<Ticket> findAll() { return tickets.findAll(); }
     public List<Ticket> findByStatus(TicketStatus status) { return tickets.findByStatus(status); }
     public List<Ticket> search(String query) { return tickets.searchByTitle(query); }
     public Ticket find(long id) { return tickets.findById(id).orElseThrow(() -> new IllegalArgumentException("Заявка не найдена")); }
+    public List<Ticket> findOverdue(java.time.LocalDateTime now) {
+        return tickets.findOverdue(now);
+    }
 }

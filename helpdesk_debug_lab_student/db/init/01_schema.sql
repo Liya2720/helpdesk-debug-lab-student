@@ -6,7 +6,7 @@ CREATE TABLE departments (
 CREATE TABLE users (
     id BIGSERIAL PRIMARY KEY,
     full_name VARCHAR(150) NOT NULL,
-    email VARCHAR(200) NOT NULL,
+    email VARCHAR(200) NOT NULL UNIQUE,
     role VARCHAR(20) NOT NULL CHECK (role IN ('CUSTOMER', 'SUPPORT', 'ADMIN')),
     department_id BIGINT REFERENCES departments(id),
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -22,12 +22,14 @@ CREATE TABLE tickets (
     title VARCHAR(200) NOT NULL,
     description TEXT NOT NULL,
     status VARCHAR(30) NOT NULL CHECK (status IN ('NEW', 'IN_PROGRESS', 'RESOLVED', 'CLOSED')),
-    priority VARCHAR(20) NOT NULL,
+    priority VARCHAR(20) NOT NULL CHECK (priority IN ('LOW', 'MEDIUM', 'HIGH', 'CRITICAL')),
     author_id BIGINT NOT NULL REFERENCES users(id),
     assignee_id BIGINT REFERENCES users(id),
     category_id BIGINT REFERENCES categories(id),
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    due_at TIMESTAMP,
+    version INT NOT NULL DEFAULT 0
 );
 
 CREATE TABLE ticket_comments (
@@ -51,3 +53,4 @@ CREATE INDEX idx_tickets_status ON tickets(status);
 CREATE INDEX idx_tickets_assignee ON tickets(assignee_id);
 CREATE INDEX idx_tickets_category ON tickets(category_id);
 CREATE INDEX idx_comments_ticket ON ticket_comments(ticket_id);
+CREATE INDEX idx_tickets_due_at ON tickets(due_at);

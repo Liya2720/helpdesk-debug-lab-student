@@ -5,7 +5,7 @@ import java.sql.DriverManager;
 import java.sql.SQLException;
 
 public final class Database {
-    private static final String DEFAULT_URL = "jdbc:postgresql://localhost:5432/helpdesk";
+    private static final String DEFAULT_URL = "jdbc:postgresql://localhost:5434/helpdesk";
     private static final String DEFAULT_USER = "helpdesk";
     private static final String DEFAULT_PASSWORD = "helpdesk";
 

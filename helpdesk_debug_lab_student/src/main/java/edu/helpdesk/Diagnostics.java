@@ -10,6 +10,7 @@ import edu.helpdesk.repository.jdbc.JdbcCommentRepository;
 import edu.helpdesk.repository.jdbc.JdbcTicketRepository;
 import edu.helpdesk.repository.jdbc.JdbcUserRepository;
 import edu.helpdesk.service.TicketService;
+import edu.helpdesk.model.TicketPriority;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -39,7 +40,10 @@ public class Diagnostics {
         check("Статус и история изменяются атомарно", this::statusChangeIsAtomic);
         check("Email пользователя уникален на уровне БД", this::emailIsUnique);
         check("БД запрещает неизвестный приоритет", this::priorityIsConstrained);
-
+        check("SLA: приоритет CRITICAL дает срок 1 час", this::slaCritical);
+        check("SLA: просроченные заявки не содержат RESOLVED", this::slaIgnoresResolved);
+        check("SLA: заявка с истекшим сроком попадает в findOverdue", this::slaOverdueFound);
+        check("Optimistic lock: нельзя обновить устаревшую версию", this::optimisticLockPreventsUpdate);
         System.out.println("\nИтог: PASS=" + passed + ", FAIL=" + failed);
         System.out.println("Перед повторным запуском диагностики данные автоматически восстанавливаются для каждого теста.");
     }
@@ -74,7 +78,7 @@ public class Diagnostics {
     private void assignmentTouchesOneTicket() throws Exception {
         reset();
         TicketRepository repo = new JdbcTicketRepository();
-        repo.assign(1, 2);
+        repo.assign(1, 2, 0);
         try (Connection c = Database.getConnection(); PreparedStatement ps = c.prepareStatement("SELECT COUNT(*) FROM tickets WHERE assignee_id = 2"); ResultSet rs = ps.executeQuery()) {
             rs.next();
             require(rs.getInt(1) == 2, "После назначения у Сергея заявок: " + rs.getInt(1) + " (с учётом исходной #2 должно быть 2)");
@@ -121,7 +125,7 @@ public class Diagnostics {
         reset();
         try {
             new JdbcTicketRepository().changeStatusAndRecordHistory(
-                    1, TicketStatus.NEW, TicketStatus.IN_PROGRESS, 9999
+                    1, TicketStatus.NEW, TicketStatus.IN_PROGRESS, 9999, 0
             );
         } catch (Exception ignored) {
         }
@@ -219,5 +223,57 @@ public class Diagnostics {
     @FunctionalInterface
     private interface CheckedAction {
         void run() throws Exception;
+    }
+
+    private void slaCritical() throws Exception {
+        reset();
+        var ticket = service().createTicket("Тест SLA", "Описание", TicketPriority.CRITICAL, 1, 1L);
+        require(ticket.getDueAt() != null, "dueAt не рассчитан");
+        // Проверяем, что срок примерно через 1 час (с погрешностью в минуту)
+        var expected = java.time.LocalDateTime.now().plusHours(1);
+        require(Math.abs(ticket.getDueAt().getMinute() - expected.getMinute()) <= 1, "Срок неверный");
+    }
+
+    private void slaIgnoresResolved() throws Exception {
+        reset();
+        // Создаем заявку и переводим ее в RESOLVED
+        var ticket = service().createTicket("Тест", "Описание", TicketPriority.LOW, 1, 1L);
+        service().changeStatus(ticket.getId(), TicketStatus.IN_PROGRESS, 2);
+        service().changeStatus(ticket.getId(), TicketStatus.RESOLVED, 2);
+
+        var overdue = service().findOverdue(java.time.LocalDateTime.now().plusHours(25));
+        require(overdue.stream().noneMatch(t -> t.getId() == ticket.getId()), "RESOLVED заявка попала в просроченные");
+    }
+
+    private void slaOverdueFound() throws Exception {
+        reset();
+        // Создаем заявку и вручную ставим ей просроченный due_at через SQL
+        var ticket = service().createTicket("Просроченная", "Описание", TicketPriority.LOW, 1, 1L);
+        try (var c = Database.getConnection(); var ps = c.prepareStatement("UPDATE tickets SET due_at = ? WHERE id = ?")) {
+            ps.setTimestamp(1, java.sql.Timestamp.valueOf(java.time.LocalDateTime.now().minusHours(1)));
+            ps.setLong(2, ticket.getId());
+            ps.executeUpdate();
+        }
+
+        var overdue = service().findOverdue(java.time.LocalDateTime.now());
+        require(overdue.stream().anyMatch(t -> t.getId() == ticket.getId()), "Просроченная заявка не найдена");
+    }
+
+    private void optimisticLockPreventsUpdate() throws Exception {
+        reset();
+        // Получаем заявку (версия 0)
+        var ticket = service().find(1);
+
+        // Меняем ее (версия станет 1)
+        service().assignTicket(1, 2);
+
+        // Пытаемся изменить ее еще раз, используя СТАРУЮ версию (0)
+        boolean rejected = false;
+        try {
+            new JdbcTicketRepository().assign(1, 3, ticket.getVersion());
+        } catch (DataAccessException e) {
+            rejected = true; // Ожидаем ошибку конфликта версий
+        }
+        require(rejected, "Устаревшая версия была принята");
     }
 }

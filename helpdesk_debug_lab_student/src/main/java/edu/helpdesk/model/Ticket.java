@@ -15,6 +15,9 @@ public class Ticket {
     private final Long categoryId;
     private final LocalDateTime createdAt;
     private final LocalDateTime updatedAt;
+    private int version;
+
+    private final LocalDateTime dueAt;
 
     public Ticket(long id,
                   String title,
@@ -25,7 +28,9 @@ public class Ticket {
                   Long assigneeId,
                   Long categoryId,
                   LocalDateTime createdAt,
-                  LocalDateTime updatedAt) {
+                  LocalDateTime updatedAt,
+                  LocalDateTime dueAt,
+                  int version) {
         this.id = id;
         this.title = title;
         this.description = description;
@@ -36,14 +41,19 @@ public class Ticket {
         this.categoryId = categoryId;
         this.createdAt = createdAt;
         this.updatedAt = updatedAt;
+        this.dueAt = dueAt;
+        this.version = version;
     }
+
+    public int getVersion() { return version; }
+    public void setVersion(int version) { this.version = version; }
 
     public boolean canTransitionTo(TicketStatus next) {
         if (status == next) {
             return true;
         }
         return switch (status) {
-            case NEW -> Set.of(TicketStatus.IN_PROGRESS, TicketStatus.RESOLVED).contains(next);
+            case NEW -> next == TicketStatus.IN_PROGRESS;
             case IN_PROGRESS -> Set.of(TicketStatus.RESOLVED, TicketStatus.NEW).contains(next);
             case RESOLVED -> Set.of(TicketStatus.CLOSED, TicketStatus.IN_PROGRESS).contains(next);
             case CLOSED -> false;
@@ -67,6 +77,8 @@ public class Ticket {
     public Long getCategoryId() { return categoryId; }
     public LocalDateTime getCreatedAt() { return createdAt; }
     public LocalDateTime getUpdatedAt() { return updatedAt; }
+
+    public LocalDateTime getDueAt() { return dueAt; }
 
     @Override
     public String toString() {
